@@ -2,6 +2,7 @@
 #define _WIIMOTE_H_
 
 #include <cstdint>
+#include <stddef.h> 
 
 enum wiimote_event_type_t {
   WIIMOTE_EVENT_INITIALIZE,
@@ -34,6 +35,7 @@ class Wiimote {
     void get_balance_weight(uint8_t *data, float *weight);
     void initiate_auth(uint16_t handle);
     void disconnect(uint16_t handle);
+    void set_reporting_mode(uint16_t handle, uint8_t mode, bool continuous);
   private:
     wiimote_callback_t _wiimote_callback;
 };

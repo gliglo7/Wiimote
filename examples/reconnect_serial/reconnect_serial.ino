@@ -1,0 +1,188 @@
+#include <Arduino.h>
+#include <Wiimote.h>
+#include <vector>
+
+#define LED_BUILTIN 2
+
+Wiimote wii;
+std::vector<uint16_t> connections(0, 0);
+bool is_scanning = false;
+#define pair_button_gpio 21
+
+void wiimote_callback(wiimote_event_type_t event_type, uint16_t wiimote, uint8_t *data, size_t len)
+{
+  printf("len:%02X ", len);
+
+  if (wiimote != 0)
+  {
+    printf("Wiimote:%04X ", wiimote);
+  }
+
+  if (event_type == WIIMOTE_EVENT_DATA)
+  {
+    if (data[1] == 0x32)
+    {
+      printf("🪇 ");
+      for (int i = 0; i < 4; i++)
+      {
+        printf("%02X ", data[i]);
+      }
+      // http://wiibrew.org/wiki/Wiimote/Extension_Controllers/Nunchuck
+      uint8_t *ext = data + 4;
+      printf(" ... Nunchuk: sx=%3d sy=%3d c=%d z=%d\n",
+             ext[0],
+             ext[1],
+             0 == (ext[5] & 0x02),
+             0 == (ext[5] & 0x01));
+    }
+    else if (data[1] == 0x34)
+    {
+      printf("👟 ");
+      for (int i = 0; i < 4; i++)
+      {
+        printf("%02X ", data[i]);
+      }
+      // https://wiibrew.org/wiki/Wii_Balance_Board#Data_Format
+      uint8_t *ext = data + 4;
+      /*printf("Balance Board: TopRight=%d BottomRight=%d TopLeft=%d BottomLeft=%d Temperature=%d BatteryLevel=0x%02x\n",
+        ext[0] * 256 + ext[1],
+        ext[2] * 256 + ext[3],
+        ext[4] * 256 + ext[5],
+        ext[6] * 256 + ext[7],
+        ext[8],
+        ext[10]
+      );*/
+
+      float weight[4];
+      wii.get_balance_weight(data, weight);
+
+      printf("↖️ %6.3f  ↗️ %6.3f  ↙️ %6.3f  ↘️ %6.3f  🔋:0x%02x\n",
+             weight[BALANCE_POSITION_TOP_LEFT],
+             weight[BALANCE_POSITION_TOP_RIGHT],
+             weight[BALANCE_POSITION_BOTTOM_LEFT],
+             weight[BALANCE_POSITION_BOTTOM_RIGHT],
+             ext[10]);
+    }
+    else
+    {
+      printf("🪄 ");
+      for (int i = 0; i < len; i++)
+      {
+        printf("%02X ", data[i]);
+      }
+      printf("\n");
+    }
+
+    bool wiimote_button_down = (data[2] & 0x01) != 0;
+    bool wiimote_button_up = (data[2] & 0x02) != 0;
+    bool wiimote_button_right = (data[2] & 0x04) != 0;
+    bool wiimote_button_left = (data[2] & 0x08) != 0;
+    bool wiimote_button_plus = (data[2] & 0x10) != 0;
+    bool wiimote_button_2 = (data[3] & 0x01) != 0;
+    bool wiimote_button_1 = (data[3] & 0x02) != 0;
+    bool wiimote_button_B = (data[3] & 0x04) != 0;
+    bool wiimote_button_A = (data[3] & 0x08) != 0;
+    bool wiimote_button_minus = (data[3] & 0x10) != 0;
+    bool wiimote_button_home = (data[3] & 0x80) != 0;
+    static bool rumble = false;
+    if (wiimote_button_plus && !rumble)
+    {
+      wii.set_rumble(wiimote, true);
+      rumble = true;
+    }
+    if (wiimote_button_minus && rumble)
+    {
+      wii.set_rumble(wiimote, false);
+      rumble = false;
+    }
+  }
+  else if (event_type == WIIMOTE_EVENT_INITIALIZE)
+  {
+    printf("🛜 Bluetooth initialize. Accepting previously paired devices.\n");
+  }
+  else if (event_type == WIIMOTE_EVENT_SCAN_START)
+  {
+    printf("🫱 Scan started. Accepting new devices for pairing.\n", wiimote);
+    is_scanning = true;
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  else if (event_type == WIIMOTE_EVENT_SCAN_STOP)
+  {
+    printf("✋ Scan stop\n");
+    is_scanning = false;
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+  else if (event_type == WIIMOTE_EVENT_NEW)
+  {
+    printf("🤝 Authenticating Wiimote.\n");
+    wii.initiate_auth(wiimote);
+  }
+  else if (event_type == WIIMOTE_EVENT_CONNECT)
+  {
+    wii.set_led(wiimote, 1 << connections.size());
+    connections.push_back(wiimote);
+    printf("✅ Connected Wiimote. Connections:%d\n", connections.size());
+  }
+  else if (event_type == WIIMOTE_EVENT_DISCONNECT)
+  {
+    // remove wiimote from connected list
+    auto iterator = std::find(connections.begin(), connections.end(), wiimote);
+    if (iterator != connections.end())
+    {
+      connections.erase(iterator);
+    }
+    printf("❌ Disconnected Wiimote. Connections:%d\n", connections.size());
+  }
+  else
+  {
+    printf("🤷🏻‍♂️ event_type=%d\n", event_type);
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  pinMode(pair_button_gpio, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
+  wii.init(wiimote_callback);
+}
+
+void loop()
+{
+  wii.handle();
+
+  // Check if there is incoming data from the Serial Monitor
+  if (Serial.available() > 0) {
+    char incomingByte = Serial.read();
+
+    // Trigger Pairing/Scanning if 'p' is pressed
+    if (incomingByte == 'p' || incomingByte == 'P') {
+      if (!is_scanning) {
+        printf("🛰️ Serial Command: Starting Scan...\n");
+        // Disconnect existing to clean up the state
+        for (auto &wiimote : connections) {
+          wii.disconnect(wiimote);
+        }
+        wii.scan(true);
+      } else {
+        printf("⚠️ Already scanning...\n");
+      }
+    }
+
+    // Trigger a brief Rumble test for all connected Wiimotes if 'r' is pressed
+    if (incomingByte == 'r' || incomingByte == 'R') {
+      if (connections.size() > 0) {
+        printf("📳 Serial Command: Testing Rumble...\n");
+        for (auto &wiimote : connections) {
+          wii.set_rumble(wiimote, true);
+        }
+        delay(200); // Short burst
+        for (auto &wiimote : connections) {
+          wii.set_rumble(wiimote, false);
+        }
+      } else {
+        printf("❌ No Wiimotes connected to rumble.\n");
+      }
+    }
+  }
+}

@@ -197,20 +197,75 @@ static uint16_t make_cmd_disconnect(uint8_t *buf, uint16_t connection_handle)
 
 // TODO long data is split to multi packets
 static uint16_t make_l2cap_single_packet(uint8_t *buf, uint16_t channel_id, uint8_t *data, uint16_t len){
-  UINT16_TO_STREAM (buf, len);
-  UINT16_TO_STREAM (buf, channel_id); // 0x0001=Signaling channel
-  ARRAY_TO_STREAM (buf, data, len);
-  return 2 + 2 + len;
+  // buf is the START of the L2CAP portion (hci_buf + 5)
+  buf[0] = (uint8_t)(len & 0xFF);
+  buf[1] = (uint8_t)(len >> 8);
+  buf[2] = (uint8_t)(channel_id & 0xFF);
+  buf[3] = (uint8_t)(channel_id >> 8);
+  
+  for (int i = 0; i < len; i++) {
+    buf[4 + i] = data[i];
+  }
+  return 4 + len;
 }
 
-static uint16_t make_acl_l2cap_single_packet(uint8_t *buf, uint16_t connection_handle, uint8_t packet_boundary_flag, uint8_t broadcast_flag, uint16_t channel_id, uint8_t *data, uint8_t len){
-  uint8_t* l2cap_buf = buf + HCI_H4_ACL_PREAMBLE_SIZE;
-  uint16_t l2cap_len = make_l2cap_single_packet(l2cap_buf, channel_id, data, len);
+static uint16_t make_acl_l2cap_single_packet(uint8_t *buf, uint16_t handle, uint8_t pbf, uint8_t bf, uint16_t cid, uint8_t *data, uint8_t len){
+  // 1. Build the L2CAP payload first at offset 5
+  uint16_t l2cap_len = make_l2cap_single_packet(&buf[5], cid, data, len);
 
-  UINT8_TO_STREAM (buf, H4_TYPE_ACL);
-  UINT8_TO_STREAM (buf, connection_handle & 0xFF);
-  UINT8_TO_STREAM (buf, ((connection_handle >> 8) & 0x0F) | packet_boundary_flag << 4 | broadcast_flag << 6);
-  UINT16_TO_STREAM (buf, l2cap_len);
+  // 2. Build the HCI ACL Header at the start
+  buf[0] = 0x02; // HCI ACL Packet Type
+  buf[1] = (uint8_t)(handle & 0xFF);
+  buf[2] = (uint8_t)(((handle >> 8) & 0x0F) | (pbf << 4) | (bf << 6));
+  buf[3] = (uint8_t)(l2cap_len & 0xFF);
+  buf[4] = (uint8_t)(l2cap_len >> 8);
 
-  return HCI_H4_ACL_PREAMBLE_SIZE + l2cap_len;
+  return 5 + l2cap_len;
+}
+
+// Report 0x14: Enable/Disable Speaker
+static uint16_t make_wii_speaker_enable(uint8_t *buf, uint16_t handle, bool enable) {
+  uint8_t report[] = { 0xa2, 0x14, (uint8_t)(enable ? 0x04 : 0x00) };
+  return make_acl_l2cap_single_packet(buf, handle, 0, 0, 0x0071, report, 3);
+}
+
+// Report 0x19: Mute/Unmute Speaker
+static uint16_t make_wii_speaker_mute(uint8_t *buf, uint16_t handle, bool mute) {
+  uint8_t report[] = { 0xa2, 0x19, (uint8_t)(mute ? 0x04 : 0x00) };
+  return make_acl_l2cap_single_packet(buf, handle, 0, 0, 0x0071, report, 3);
+}
+
+static uint16_t make_wii_write_register(uint8_t *buf, uint16_t handle, uint32_t offset, uint8_t *data, uint8_t len) {
+  uint8_t report[24]; // Extra padding for safety
+  memset(report, 0, sizeof(report));
+  
+  report[0] = 0xa2; // HID Output
+  report[1] = 0x16; // Write Memory
+  report[2] = (uint8_t)((offset >> 16) & 0xFF);
+  report[3] = (uint8_t)((offset >> 8) & 0xFF);
+  report[4] = (uint8_t)(offset & 0xFF);
+  report[5] = (len > 16) ? 16 : len; // Wiimote cap is 16 bytes per write
+
+  for (int i = 0; i < report[5]; i++) {
+    report[6 + i] = data[i];
+  }
+
+  // Report 0x16 is ALWAYS 21 bytes of payload + 0xa2 header = 22 bytes total
+  return make_acl_l2cap_single_packet(buf, handle, 0, 0, 0x0071, report, 22);
+}
+
+static uint16_t make_wii_speaker_data(uint8_t *buf, uint16_t handle, uint8_t *audio, uint8_t len) {
+  uint8_t report[24]; 
+  memset(report, 0, sizeof(report));
+
+  report[0] = 0xa2;
+  report[1] = 0x18;
+  report[2] = (uint8_t)((len > 20 ? 20 : len) << 3);
+
+  for (int i = 0; i < 20 && i < len; i++) {
+    report[3 + i] = audio[i];
+  }
+
+  // Report 0x18 is ALWAYS 22 bytes of payload + 0xa2 header = 23 bytes total
+  return make_acl_l2cap_single_packet(buf, handle, 0, 0, 0x0071, report, 23);
 }

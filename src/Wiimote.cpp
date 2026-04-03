@@ -4,6 +4,7 @@
 #include <esp32-hal-log.h>
 #include <esp32-hal-bt.h>
 #include <esp_mac.h>
+#include <Arduino.h>
 
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
@@ -403,7 +404,9 @@ static void process_inquiry_result_event(uint8_t len, uint8_t* data){
 
       idx = scanned_device_add(scanned_device);
       if(0<=idx){
-        if(data[pos+9]==0x04 && data[pos+10]==0x25 && data[pos+11]==0x00){ // Filter for Wiimote [04 25 00] 
+        Serial.printf("[DEBUG] Device COD: %02X %02X %02X\n", data[pos+9], data[pos+10], data[pos+11]);
+        if((data[pos+9]==0x04 && data[pos+10]==0x25 && data[pos+11]==0x00) ||
+   (data[pos+9]==0x08 && data[pos+10]==0x05 && data[pos+11]==0x00)){ // Filter for Wiimote [04 25 00] and other one
           uint16_t len = make_cmd_remote_name_request(tmp_data, scanned_device.bd_addr, scanned_device.psrm, scanned_device.clkofs);
           _queue_data(_tx_queue, tmp_data, len); // TODO: check return
           log_d("queued remote_name_request.");
@@ -433,10 +436,18 @@ static void process_remote_name_request_complete_event(uint8_t len, uint8_t* dat
   log_d("  BD_ADDR = %s", formatHex((uint8_t*)&bd_addr.addr, BD_ADDR_LEN));
 
   char* name = (char*)(data+7);
+  // TEMP DEBUG — print the actual name
+  Serial.print("[DEBUG] Remote name: '");
+  Serial.print(name);
+  Serial.println("'");
+
+
   log_d("  REMOTE_NAME = %s", name);
 
   int idx = scanned_device_find(&bd_addr);
-  if(0<=idx && (strcmp("Nintendo RVL-CNT-01", name)==0 || strcmp("Nintendo RVL-WBC-01", name)==0)){
+  if(0<=idx && (strcmp("Nintendo RVL-CNT-01", name)==0 || 
+              strcmp("Nintendo RVL-WBC-01", name)==0 ||
+              strcmp("Nintendo RVL-CNT-01-TR", name)==0)){
     struct scanned_device_t scanned_device = scanned_device_list[idx];
     struct requested_connection_t requested_connection;
     requested_connection.bd_addr = bd_addr;
@@ -815,9 +826,12 @@ static void process_l2cap_configuration_response(uint16_t connection_handle, uin
   int idx = l2cap_connection_find_by_local_cid(connection_handle, source_cid);
   struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
 
-  if(!l2cap_connection.initiator && l2cap_connection.psm == PSM_HID_Interrupt_13){
+  if(l2cap_connection.psm == PSM_HID_Interrupt_13){
     _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
   }
+
+  Serial.printf("[DEBUG] CONFIG RESPONSE for cid=0x%04X initiator=%d psm=0x%04X result=0x%04X\n",
+  source_cid, l2cap_connection.initiator, l2cap_connection.psm, result);
 }
 
 static void process_l2cap_configuration_request(uint16_t connection_handle, uint8_t* data){
@@ -825,59 +839,58 @@ static void process_l2cap_configuration_request(uint16_t connection_handle, uint
   uint16_t len             = (data[ 3] << 8) | data[ 2];
   uint16_t destination_cid = (data[ 5] << 8) | data[ 4];
   uint16_t flags           = (data[ 7] << 8) | data[ 6];
-  // config = data[8..]
 
-  log_d("L2CAP CONFIGURATION REQUEST");
-  log_d("  identifier      = %02X", identifier);
-  log_d("  len             = %02X", len);
-  log_d("  destination_cid = %04X", destination_cid);
-  log_d("  flags           = %04X", flags);
-  log_d("  config          = %s", formatHex(data+8, len-4));
+  Serial.printf("[DEBUG] L2CAP config request len=0x%02X flags=0x%04X\n", len, flags);
 
   if(flags != 0x0000){
-    log_d("!!! flags!=0x0000");
+    Serial.println("[DEBUG] REJECTED: flags!=0");
     return;
   }
-  if(len != 0x08){
-    log_d("!!! len!=0x08");
-    return;
+
+  int idx = l2cap_connection_find_by_local_cid(connection_handle, destination_cid);
+  struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+
+  uint8_t  packet_boundary_flag = 0b10;
+  uint8_t  broadcast_flag       = 0b00;
+  uint16_t channel_id           = 0x0001;
+  uint16_t source_cid           = l2cap_connection.remote_cid;
+
+  uint16_t mtu = 0x0040; // default MTU
+
+  // Only parse MTU if config options are present (len > 0x04)
+  if(len >= 0x08 && data[8]==0x01 && data[9]==0x02){
+    mtu = (data[11] << 8) | data[10];
+    Serial.printf("[DEBUG] MTU from request: %d\n", mtu);
+  } else {
+    Serial.println("[DEBUG] No MTU option — using default 64");
   }
-  if(data[8]==0x01 && data[9]==0x02){ // MTU
-    uint16_t mtu = (data[11] << 8) | data[10];
-    log_d("  MTU=%d", mtu);
 
-    int idx = l2cap_connection_find_by_local_cid(connection_handle, destination_cid);
-    struct l2cap_connection_t l2cap_connection = l2cap_connection_list[idx];
+  // Send configuration response
+  uint8_t response[] = {
+    0x05,       // CONFIGURATION RESPONSE
+    identifier,
+    0x0A, 0x00, // Length: 0x000A
+    (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8),
+    0x00, 0x00, // Flags
+    0x00, 0x00, // Result: success
+    0x01, 0x02, (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8)
+  };
+  uint16_t data_len = 14;
+  uint16_t plen = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, response, data_len);
+  _queue_data(_tx_queue, tmp_data, plen);
+  Serial.println("[DEBUG] Sent config response");
 
-    uint8_t  packet_boundary_flag = 0b10; // Packet_Boundary_Flag
-    uint8_t  broadcast_flag       = 0b00; // Broadcast_Flag
-    uint16_t channel_id           = 0x0001;
-    uint16_t source_cid           = l2cap_connection.remote_cid;
-    uint8_t data[] = {
-      0x05,       // CONFIGURATION RESPONSE
-      identifier, // Identifier
-      0x0A, 0x00, // Length: 0x000A
-      (uint8_t)(source_cid & 0xFF), (uint8_t)(source_cid >> 8), // Source CID
-      0x00, 0x00, // Flags
-      0x00, 0x00, // Res
-      0x01, 0x02, (uint8_t)(mtu & 0xFF), (uint8_t)(mtu >> 8) // type=01 len=02 value=xx xx
-    };
-    uint16_t data_len = 14;
-    uint16_t len = make_acl_l2cap_single_packet(tmp_data, connection_handle, packet_boundary_flag, broadcast_flag, channel_id, data, data_len);
-    _queue_data(_tx_queue, tmp_data, len); // TODO: check return
-    log_d("queued acl_l2cap_single_packet(CONFIGURATION RESPONSE)");
-
-    if (l2cap_connection.initiator) {
-      if(l2cap_connection.psm == PSM_HID_Control_11){
-        _singleton->_callback(WIIMOTE_EVENT_NEW, connection_handle, NULL, 0);
-        _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
-      } else
-      if(l2cap_connection.psm == PSM_HID_Interrupt_13){
-        _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
-      }
-    } else {
-      _l2cap_configure(connection_handle, l2cap_connection.local_cid, mtu);
+  if(l2cap_connection.initiator) {
+    if(l2cap_connection.psm == PSM_HID_Control_11){
+      Serial.println("[DEBUG] HID Control configured — connecting interrupt channel");
+      _singleton->_callback(WIIMOTE_EVENT_NEW, connection_handle, NULL, 0);
+      _l2cap_connect(connection_handle, PSM_HID_Interrupt_13, _g_local_cid++);
+    } else if(l2cap_connection.psm == PSM_HID_Interrupt_13){
+      Serial.println("[DEBUG] HID Interrupt configured — CONNECTED!");
+      _singleton->_callback(WIIMOTE_EVENT_CONNECT, connection_handle, NULL, 0);
     }
+  } else {
+    _l2cap_configure(connection_handle, l2cap_connection.local_cid, mtu);
   }
 }
 
@@ -950,20 +963,16 @@ static void process_extension_controller_reports(uint16_t connection_handle, uin
   case 3:
     // 0x21 Read response
     // (a1) 21 BB BB SE FF FF DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD DD
-    if(data[1] == 0x21){
-      if(memcmp(data+5, (const uint8_t[]){0x00, 0xFA}, 2)==0){
-        if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6)==0){ // Nunchuck
-          _set_reporting_mode(connection_handle, 0x32, false); // 0x32: Core Buttons with 8 Extension bytes : 32 BB BB EE EE EE EE EE EE EE EE
-        }
-        if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6)==0){ // Wii Balance Board
-          _read_memory(connection_handle, CONTROL_REGISTER, 0xA40024, 16); // read calibration 0 kg and 17kg
-
-          controller_query_state = 4;
-        }
-        else {
-          controller_query_state = 0;
-        } 
-      }
+    if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x00, 0x00}, 6) == 0) { // Nunchuck
+        _set_reporting_mode(connection_handle, 0x32, false);
+        controller_query_state = 0; // Terminé pour Nunchuck
+    } 
+    else if(memcmp(data+7, (const uint8_t[]){0x00, 0x00, 0xA4, 0x20, 0x04, 0x02}, 6) == 0) { // Balance Board
+        _read_memory(connection_handle, CONTROL_REGISTER, 0xA40024, 16);
+        controller_query_state = 4;
+    }
+    else {
+        controller_query_state = 0; // Reset seulement si aucun des deux
     }
     break;
   case 4:
@@ -1223,4 +1232,8 @@ void Wiimote::get_balance_weight(uint8_t *data, float *weight) {
 
 void Wiimote::initiate_auth(uint16_t handle) {
   _initiate_auth(handle);
+}
+
+void Wiimote::set_reporting_mode(uint16_t handle, uint8_t mode, bool continuous) {
+  _set_reporting_mode(handle, mode, continuous);
 }
