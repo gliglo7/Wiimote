@@ -2,7 +2,33 @@
 #define _WIIMOTE_H_
 
 #include <cstdint>
-#include <stddef.h> 
+#include <stddef.h>
+
+/*
+    bool wiimote_button_down = (data[2] & 0x01) != 0;
+    bool wiimote_button_up = (data[2] & 0x02) != 0;
+    bool wiimote_button_right = (data[2] & 0x04) != 0;
+    bool wiimote_button_left = (data[2] & 0x08) != 0;
+    bool wiimote_button_plus = (data[2] & 0x10) != 0;
+    bool wiimote_button_2 = (data[3] & 0x01) != 0;
+    bool wiimote_button_1 = (data[3] & 0x02) != 0;
+    bool wiimote_button_B = (data[3] & 0x04) != 0;
+    bool wiimote_button_A = (data[3] & 0x08) != 0;
+    bool wiimote_button_minus = (data[3] & 0x10) != 0;
+    bool wiimote_button_home = (data[3] & 0x80) != 0;
+    */
+// #define WIIMOTE_BUTTON_UP 0x0100
+// #define WIIMOTE_BUTTON_DOWN 0x0200
+// #define WIIMOTE_BUTTON_RIGHT 0x0400
+// #define WIIMOTE_BUTTON_LEFT 0x0800
+// #define WIIMOTE_BUTTON_PLUS 0x1000
+// #define WIIMOTE_BUTTON_2 0x0001
+// #define WIIMOTE_BUTTON_1 0x0002
+// #define WIIMOTE_BUTTON_B 0x0004
+// #define WIIMOTE_BUTTON_A 0x0008
+// #define WIIMOTE_BUTTON_MINUS 0x0010
+// #define WIIMOTE_BUTTON_HOME 0x0080
+
 
 enum wiimote_event_type_t {
   WIIMOTE_EVENT_INITIALIZE,
